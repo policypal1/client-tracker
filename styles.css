@@ -272,3 +272,93 @@ h1 {
   .danger-btn { grid-column: 2; grid-row: 2; justify-self: end; }
   .section-note { display: none; }
 }
+
+/* Keep an open three-dot menu above every neighboring payment card. */
+.payment-card.menu-open {
+  z-index: 60;
+  border-color: #314037;
+}
+.payment-card.menu-open .menu-popover { z-index: 70; }
+.payment-list { position: relative; isolation: isolate; }
+
+.header-side { display: grid; justify-items: end; gap: 8px; }
+.sync-line { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.sync-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(16, 21, 18, .72);
+  font-size: 11px;
+  font-weight: 700;
+}
+.sync-badge.synced { color: var(--accent-2); border-color: rgba(74, 222, 128, .3); }
+.sync-badge.saving, .sync-badge.connecting { color: var(--warning); }
+.sync-badge.error { color: var(--danger); }
+.text-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 3px 0;
+  cursor: pointer;
+  font-size: 12px;
+}
+.text-btn:hover { color: var(--text); }
+
+.auth-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.auth-card {
+  width: min(420px, 100%);
+  border: 1px solid var(--border-soft);
+  background: rgba(16, 21, 18, .9);
+  border-radius: 20px;
+  padding: 26px;
+  box-shadow: var(--shadow);
+}
+.auth-card h1 { font-size: 34px; }
+.auth-copy { color: var(--muted); line-height: 1.5; margin: 10px 0 22px; font-size: 14px; }
+.auth-form { display: grid; gap: 13px; }
+.auth-form label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.auth-form input {
+  width: 100%;
+  border: 1px solid #2c3a31;
+  background: #0b100d;
+  color: var(--text);
+  border-radius: 11px;
+  padding: 12px 13px;
+  outline: none;
+}
+.auth-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34, 197, 94, .13); }
+.auth-message {
+  padding: 10px 11px;
+  border: 1px solid #384330;
+  border-radius: 10px;
+  color: #d8dfda;
+  background: #131a15;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.auth-primary, .auth-secondary { width: 100%; }
+.auth-primary { margin-top: 2px; }
+button:disabled { opacity: .58; cursor: wait; transform: none !important; }
+
+@media (max-width: 800px) {
+  .header-side { display: none; }
+  .menu-popover { width: min(230px, calc(100vw - 48px)); }
+}
+
+@media (max-width: 800px) {
+  /* On phones, open the three-dot menu upward so it never falls off the bottom of the screen. */
+  .menu-popover {
+    top: auto;
+    bottom: calc(100% + 8px);
+  }
+}

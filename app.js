@@ -1,9 +1,15 @@
 (() => {
   'use strict';
 
-  const STORAGE_KEY = 'kumpula-payment-tracker-v2';
-  const OLD_STORAGE_KEYS = ['kumpula-payment-tracker-v1'];
+  const STORAGE_KEY = 'kumpula-payment-tracker-v3';
+  const OLD_STORAGE_KEYS = ['kumpula-payment-tracker-v2', 'kumpula-payment-tracker-v1'];
   const app = document.getElementById('app');
+
+  const CONFIG = window.PAYMENT_TRACKER_CONFIG || {};
+  const SUPABASE_URL = String(CONFIG.supabaseUrl || '').trim().replace(/\/$/, '');
+  const SUPABASE_KEY = String(CONFIG.supabaseKey || '').trim();
+  const CLOUD_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_KEY && window.supabase?.createClient);
+  const sb = CLOUD_CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
   const DEFAULT_CLIENTS = [
     { id: 'kumpula-mobile-detailing', name: 'Kumpula Mobile Detailing', amount: 200, dueDay: 12 },
@@ -11,12 +17,38 @@
     { id: 'zh-homes', name: 'ZH Homes', amount: 400, dueDay: 26 }
   ];
 
-  let data = loadData();
+  let data = loadLocalData();
+  let session = null;
   let modalClientId = null;
   let openMenuClientId = null;
   let toastTimer = null;
+  let saveTimer = null;
+  let syncState = CLOUD_CONFIGURED ? 'connecting' : 'local';
+  let authMessage = '';
+  let authBusy = false;
 
-  function loadData() {
+  function normalizeData(saved) {
+    const savedClients = Array.isArray(saved?.clients) ? saved.clients : [];
+    const byId = new Map(savedClients.map(client => [client.id, client]));
+    const clients = DEFAULT_CLIENTS.map(def => {
+      const previous = byId.get(def.id) || {};
+      return {
+        ...def,
+        ...previous,
+        amount: previous.amount == null ? def.amount : Number(previous.amount),
+        dueDay: def.dueDay,
+        name: def.name
+      };
+    });
+
+    return {
+      clients,
+      payments: Array.isArray(saved?.payments) ? saved.payments : [],
+      skips: Array.isArray(saved?.skips) ? saved.skips : []
+    };
+  }
+
+  function loadLocalData() {
     let saved = null;
     try {
       saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
@@ -31,31 +63,109 @@
       }
     } catch (_) {}
 
-    const savedClients = Array.isArray(saved?.clients) ? saved.clients : [];
-    const byId = new Map(savedClients.map(client => [client.id, client]));
-    const clients = DEFAULT_CLIENTS.map(def => {
-      const previous = byId.get(def.id) || {};
-      return {
-        ...def,
-        ...previous,
-        amount: previous.amount == null ? def.amount : Number(previous.amount),
-        dueDay: def.dueDay,
-        name: def.name
-      };
-    });
-
-    const normalized = {
-      clients,
-      payments: Array.isArray(saved?.payments) ? saved.payments : [],
-      skips: Array.isArray(saved?.skips) ? saved.skips : []
-    };
-
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized)); } catch (_) {}
+    const normalized = normalizeData(saved || {});
+    saveLocalData(normalized);
     return normalized;
   }
 
+  function saveLocalData(value = data) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(value)); } catch (_) {}
+  }
+
   function saveData() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    saveLocalData(data);
+    if (!sb || !session?.user?.id) return;
+
+    syncState = 'saving';
+    updateSyncBadge();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => void saveCloudData(), 180);
+  }
+
+  async function saveCloudData() {
+    if (!sb || !session?.user?.id) return;
+    const userId = session.user.id;
+
+    const { error } = await sb
+      .from('payment_tracker')
+      .upsert({
+        user_id: userId,
+        data,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'user_id' });
+
+    syncState = error ? 'error' : 'synced';
+    updateSyncBadge();
+    if (error) console.error('Supabase save failed:', error);
+  }
+
+  async function loadCloudData() {
+    if (!sb || !session?.user?.id) return;
+    syncState = 'connecting';
+    renderDashboard();
+
+    const userId = session.user.id;
+    const { data: row, error } = await sb
+      .from('payment_tracker')
+      .select('data')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error) {
+      console.error('Supabase load failed:', error);
+      syncState = 'error';
+      renderDashboard();
+      showToast('Could not load Supabase. Using local data.');
+      return;
+    }
+
+    if (row?.data) {
+      data = normalizeData(row.data);
+      saveLocalData(data);
+      syncState = 'synced';
+      renderDashboard();
+      return;
+    }
+
+    // First login: copy the current browser data into Supabase.
+    syncState = 'saving';
+    renderDashboard();
+    await saveCloudData();
+    renderDashboard();
+  }
+
+  async function init() {
+    if (!CLOUD_CONFIGURED) {
+      renderDashboard();
+      return;
+    }
+
+    const { data: sessionData, error } = await sb.auth.getSession();
+    if (error) console.error('Supabase session error:', error);
+    session = sessionData?.session || null;
+
+    sb.auth.onAuthStateChange((event, nextSession) => {
+      const oldUserId = session?.user?.id;
+      const nextUserId = nextSession?.user?.id;
+      session = nextSession || null;
+
+      if (!session) {
+        syncState = 'connecting';
+        renderAuth();
+        return;
+      }
+
+      if (nextUserId && nextUserId !== oldUserId && event === 'SIGNED_IN') {
+        void loadCloudData();
+      }
+    });
+
+    if (!session) {
+      renderAuth();
+      return;
+    }
+
+    await loadCloudData();
   }
 
   function uid() {
@@ -128,8 +238,7 @@
     }
     if (days === 0) return { text: 'Due today', cls: 'soon' };
     if (days === 1) return { text: 'Tomorrow', cls: 'soon' };
-    if (days <= 7) return { text: `In ${days} days`, cls: 'soon' };
-    return { text: `In ${days} days`, cls: '' };
+    return { text: `In ${days} days`, cls: days <= 7 ? 'soon' : '' };
   }
 
   function totals() {
@@ -152,7 +261,15 @@
       .replaceAll("'", '&#039;');
   }
 
-  function render() {
+  function syncLabel() {
+    if (!CLOUD_CONFIGURED) return 'Local only';
+    if (syncState === 'saving') return 'Saving…';
+    if (syncState === 'error') return 'Sync error';
+    if (syncState === 'connecting') return 'Connecting…';
+    return 'Synced';
+  }
+
+  function renderDashboard() {
     const summary = totals();
     const now = new Date();
     const ordered = [...data.clients]
@@ -174,7 +291,13 @@
             <h1>Payments</h1>
             <p class="subtitle">See what’s coming up, then mark it paid or skip it.</p>
           </div>
-          <div class="today">${formatDate(now)}</div>
+          <div class="header-side">
+            <div class="today">${formatDate(now)}</div>
+            <div class="sync-line">
+              <span class="sync-badge ${syncState}" id="sync-badge">${syncLabel()}</span>
+              ${CLOUD_CONFIGURED && session ? '<button class="text-btn" id="sign-out">Sign out</button>' : ''}
+            </div>
+          </div>
         </header>
 
         <section class="stats" aria-label="Payment summary">
@@ -205,7 +328,7 @@
               const status = dueText(due.date);
               const menuOpen = openMenuClientId === client.id;
               return `
-                <article class="payment-card">
+                <article class="payment-card ${menuOpen ? 'menu-open' : ''}">
                   <div class="client-block">
                     <div class="client-name">${escapeHtml(client.name)}</div>
                     <div class="client-meta">Due every month on the ${ordinal(client.dueDay)}</div>
@@ -260,7 +383,105 @@
       ${modalClientId ? renderAmountModal(modalClientId) : ''}
     `;
 
-    bindEvents();
+    bindDashboardEvents();
+  }
+
+  function renderAuth() {
+    app.innerHTML = `
+      <div class="auth-shell">
+        <section class="auth-card">
+          <div class="eyebrow">Kumpula</div>
+          <h1>Payments</h1>
+          <p class="auth-copy">Sign in once and your payment history will sync through Supabase.</p>
+          <form id="auth-form" class="auth-form">
+            <label>
+              <span>Email</span>
+              <input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com" />
+            </label>
+            <label>
+              <span>Password</span>
+              <input id="auth-password" type="password" autocomplete="current-password" minlength="6" required placeholder="••••••••" />
+            </label>
+            ${authMessage ? `<div class="auth-message">${escapeHtml(authMessage)}</div>` : ''}
+            <button class="primary-btn auth-primary" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Working…' : 'Sign in'}</button>
+            <button class="ghost-btn auth-secondary" type="button" id="create-account" ${authBusy ? 'disabled' : ''}>Create account</button>
+          </form>
+        </section>
+      </div>
+    `;
+
+    const form = document.getElementById('auth-form');
+    form?.addEventListener('submit', event => {
+      event.preventDefault();
+      void signIn();
+    });
+    document.getElementById('create-account')?.addEventListener('click', () => void signUp());
+  }
+
+  async function signIn() {
+    if (!sb || authBusy) return;
+    const email = document.getElementById('auth-email')?.value.trim();
+    const password = document.getElementById('auth-password')?.value;
+    if (!email || !password) return;
+
+    authBusy = true;
+    authMessage = '';
+    renderAuth();
+
+    const { data: result, error } = await sb.auth.signInWithPassword({ email, password });
+    authBusy = false;
+
+    if (error) {
+      authMessage = error.message;
+      renderAuth();
+      return;
+    }
+
+    session = result.session;
+    authMessage = '';
+    await loadCloudData();
+  }
+
+  async function signUp() {
+    if (!sb || authBusy) return;
+    const email = document.getElementById('auth-email')?.value.trim();
+    const password = document.getElementById('auth-password')?.value;
+    if (!email || !password) {
+      authMessage = 'Enter an email and password first.';
+      renderAuth();
+      return;
+    }
+
+    authBusy = true;
+    authMessage = '';
+    renderAuth();
+
+    const { data: result, error } = await sb.auth.signUp({ email, password });
+    authBusy = false;
+
+    if (error) {
+      authMessage = error.message;
+      renderAuth();
+      return;
+    }
+
+    if (result.session) {
+      session = result.session;
+      await loadCloudData();
+      return;
+    }
+
+    authMessage = 'Account created. Confirm the email from Supabase, then sign in.';
+    renderAuth();
+  }
+
+  async function signOut() {
+    if (!sb) return;
+    await sb.auth.signOut();
+    session = null;
+    syncState = 'connecting';
+    authMessage = '';
+    renderAuth();
   }
 
   function renderAmountModal(clientId) {
@@ -286,13 +507,13 @@
     `;
   }
 
-  function bindEvents() {
+  function bindDashboardEvents() {
     document.querySelectorAll('[data-menu]').forEach(button => {
       button.addEventListener('click', event => {
         event.stopPropagation();
         const clientId = button.dataset.menu;
         openMenuClientId = openMenuClientId === clientId ? null : clientId;
-        render();
+        renderDashboard();
       });
     });
 
@@ -301,14 +522,18 @@
     });
 
     document.querySelectorAll('[data-skip]').forEach(button => {
-      button.addEventListener('click', () => skipPayment(button.dataset.skip));
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        skipPayment(button.dataset.skip);
+      });
     });
 
     document.querySelectorAll('[data-edit]').forEach(button => {
-      button.addEventListener('click', () => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
         modalClientId = button.dataset.edit;
         openMenuClientId = null;
-        render();
+        renderDashboard();
         queueMicrotask(() => document.getElementById('amount-input')?.focus());
       });
     });
@@ -323,6 +548,8 @@
     });
 
     document.getElementById('cancel-modal')?.addEventListener('click', closeModal);
+    document.getElementById('sign-out')?.addEventListener('click', () => void signOut());
+
     document.getElementById('amount-form')?.addEventListener('submit', event => {
       event.preventDefault();
       const client = data.clients.find(c => c.id === modalClientId);
@@ -331,7 +558,7 @@
       client.amount = value;
       saveData();
       modalClientId = null;
-      render();
+      renderDashboard();
       showToast('Monthly payment updated.');
     });
 
@@ -342,12 +569,12 @@
     if (!openMenuClientId) return;
     if (event.target.closest('.menu-wrap')) return;
     openMenuClientId = null;
-    render();
+    renderDashboard();
   }
 
   function closeModal() {
     modalClientId = null;
-    render();
+    renderDashboard();
   }
 
   function markPaid(clientId) {
@@ -365,7 +592,7 @@
 
     openMenuClientId = null;
     saveData();
-    render();
+    renderDashboard();
     showToast(`${client.name} marked paid.`);
   }
 
@@ -386,7 +613,7 @@
 
     openMenuClientId = null;
     saveData();
-    render();
+    renderDashboard();
     showToast(`${label} payment skipped.`);
   }
 
@@ -394,7 +621,7 @@
     if (type === 'paid') data.payments = data.payments.filter(payment => payment.id !== id);
     if (type === 'skipped') data.skips = data.skips.filter(skip => skip.id !== id);
     saveData();
-    render();
+    renderDashboard();
     showToast(type === 'skipped' ? 'Skipped payment restored.' : 'Payment removed.');
   }
 
@@ -407,6 +634,13 @@
     return `${n}th`;
   }
 
+  function updateSyncBadge() {
+    const badge = document.getElementById('sync-badge');
+    if (!badge) return;
+    badge.className = `sync-badge ${syncState}`;
+    badge.textContent = syncLabel();
+  }
+
   function showToast(message) {
     clearTimeout(toastTimer);
     document.querySelector('.toast')?.remove();
@@ -417,5 +651,5 @@
     toastTimer = setTimeout(() => toast.remove(), 2200);
   }
 
-  render();
+  void init();
 })();

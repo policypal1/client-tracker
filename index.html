@@ -7,9 +7,17 @@
   <meta name="description" content="Simple recurring client payment tracker" />
   <title>Kumpula Payments</title>
   <link rel="stylesheet" href="./styles.css" />
+
+  <script>
+    window.PAYMENT_TRACKER_CONFIG = {
+      supabaseUrl: 'https://qihajayxjukppcnsrgpi.supabase.co',
+      supabaseKey: 'sb_publishable_NCPec56HEwlcQroUnCtp2Q_Niz3sNH6'
+    };
+  </script>
 </head>
 <body>
   <main id="app"></main>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="./app.js"></script>
 </body>
 </html>
