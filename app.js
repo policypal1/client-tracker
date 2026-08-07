@@ -24,6 +24,7 @@
   let toastTimer = null;
   let saveTimer = null;
   let syncState = CLOUD_CONFIGURED ? 'connecting' : 'local';
+  let syncErrorMessage = '';
 
   function normalizeData(saved) {
     const savedClients = Array.isArray(saved?.clients) ? saved.clients : [];
@@ -93,6 +94,7 @@
       }, { onConflict: 'user_id' });
 
     syncState = error ? 'error' : 'synced';
+    syncErrorMessage = error ? (error.message || 'Supabase save failed.') : '';
     updateSyncBadge();
     if (error) console.error('Supabase save failed:', error);
   }
@@ -112,8 +114,9 @@
     if (error) {
       console.error('Supabase load failed:', error);
       syncState = 'error';
+      syncErrorMessage = error.message || 'Could not load Supabase.';
       renderDashboard();
-      showToast('Could not load Supabase. Using local data.');
+      showToast('Could not load Supabase. Your payments are still saved on this device.', 4200);
       return;
     }
 
@@ -121,6 +124,7 @@
       data = normalizeData(row.data);
       saveLocalData(data);
       syncState = 'synced';
+      syncErrorMessage = '';
       renderDashboard();
       return;
     }
@@ -157,9 +161,16 @@
       await loadCloudData();
     } catch (error) {
       console.error('Supabase background sync failed:', error);
+      const message = String(error?.message || error || 'Unknown Supabase error');
       syncState = 'error';
+      syncErrorMessage = message;
       updateSyncBadge();
-      showToast('Supabase sync is off. Tracker is still saved on this device.');
+
+      if (/anonymous/i.test(message) && /(disabled|not enabled|provider)/i.test(message)) {
+        showToast('Enable Anonymous Sign-Ins in Supabase Authentication, then refresh this page.', 6500);
+      } else {
+        showToast(`Supabase sync error: ${message}`, 6500);
+      }
     }
   }
 
@@ -289,7 +300,7 @@
           <div class="header-side">
             <div class="today">${formatDate(now)}</div>
             <div class="sync-line">
-              <span class="sync-badge ${syncState}" id="sync-badge">${syncLabel()}</span>
+              <span class="sync-badge ${syncState}" id="sync-badge" title="${escapeHtml(syncErrorMessage || syncLabel())}">${syncLabel()}</span>
             </div>
           </div>
         </header>
@@ -534,16 +545,17 @@
     if (!badge) return;
     badge.className = `sync-badge ${syncState}`;
     badge.textContent = syncLabel();
+    badge.title = syncErrorMessage || syncLabel();
   }
 
-  function showToast(message) {
+  function showToast(message, duration = 2200) {
     clearTimeout(toastTimer);
     document.querySelector('.toast')?.remove();
     const toast = document.createElement('div');
     toast.className = 'toast';
     toast.textContent = message;
     document.body.appendChild(toast);
-    toastTimer = setTimeout(() => toast.remove(), 2200);
+    toastTimer = setTimeout(() => toast.remove(), duration);
   }
 
   void init();
