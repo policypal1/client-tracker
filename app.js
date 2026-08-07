@@ -24,8 +24,6 @@
   let toastTimer = null;
   let saveTimer = null;
   let syncState = CLOUD_CONFIGURED ? 'connecting' : 'local';
-  let authMessage = '';
-  let authBusy = false;
 
   function normalizeData(saved) {
     const savedClients = Array.isArray(saved?.clients) ? saved.clients : [];
@@ -135,37 +133,34 @@
   }
 
   async function init() {
-    if (!CLOUD_CONFIGURED) {
-      renderDashboard();
-      return;
-    }
+    // Always show the tracker immediately. Supabase authentication happens
+    // silently in the background using an anonymous user, so there is no
+    // sign-in page or account setup.
+    renderDashboard();
 
-    const { data: sessionData, error } = await sb.auth.getSession();
-    if (error) console.error('Supabase session error:', error);
-    session = sessionData?.session || null;
+    if (!CLOUD_CONFIGURED) return;
 
-    sb.auth.onAuthStateChange((event, nextSession) => {
-      const oldUserId = session?.user?.id;
-      const nextUserId = nextSession?.user?.id;
-      session = nextSession || null;
+    try {
+      const { data: sessionData, error: sessionError } = await sb.auth.getSession();
+      if (sessionError) throw sessionError;
+      session = sessionData?.session || null;
 
       if (!session) {
         syncState = 'connecting';
-        renderAuth();
-        return;
+        updateSyncBadge();
+        const { data: anonymousData, error: anonymousError } = await sb.auth.signInAnonymously();
+        if (anonymousError) throw anonymousError;
+        session = anonymousData?.session || null;
       }
 
-      if (nextUserId && nextUserId !== oldUserId && event === 'SIGNED_IN') {
-        void loadCloudData();
-      }
-    });
-
-    if (!session) {
-      renderAuth();
-      return;
+      if (!session?.user?.id) throw new Error('Supabase did not return an anonymous session.');
+      await loadCloudData();
+    } catch (error) {
+      console.error('Supabase background sync failed:', error);
+      syncState = 'error';
+      updateSyncBadge();
+      showToast('Supabase sync is off. Tracker is still saved on this device.');
     }
-
-    await loadCloudData();
   }
 
   function uid() {
@@ -295,7 +290,6 @@
             <div class="today">${formatDate(now)}</div>
             <div class="sync-line">
               <span class="sync-badge ${syncState}" id="sync-badge">${syncLabel()}</span>
-              ${CLOUD_CONFIGURED && session ? '<button class="text-btn" id="sign-out">Sign out</button>' : ''}
             </div>
           </div>
         </header>
@@ -386,104 +380,6 @@
     bindDashboardEvents();
   }
 
-  function renderAuth() {
-    app.innerHTML = `
-      <div class="auth-shell">
-        <section class="auth-card">
-          <div class="eyebrow">Kumpula</div>
-          <h1>Payments</h1>
-          <p class="auth-copy">Sign in once and your payment history will sync through Supabase.</p>
-          <form id="auth-form" class="auth-form">
-            <label>
-              <span>Email</span>
-              <input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com" />
-            </label>
-            <label>
-              <span>Password</span>
-              <input id="auth-password" type="password" autocomplete="current-password" minlength="6" required placeholder="••••••••" />
-            </label>
-            ${authMessage ? `<div class="auth-message">${escapeHtml(authMessage)}</div>` : ''}
-            <button class="primary-btn auth-primary" type="submit" ${authBusy ? 'disabled' : ''}>${authBusy ? 'Working…' : 'Sign in'}</button>
-            <button class="ghost-btn auth-secondary" type="button" id="create-account" ${authBusy ? 'disabled' : ''}>Create account</button>
-          </form>
-        </section>
-      </div>
-    `;
-
-    const form = document.getElementById('auth-form');
-    form?.addEventListener('submit', event => {
-      event.preventDefault();
-      void signIn();
-    });
-    document.getElementById('create-account')?.addEventListener('click', () => void signUp());
-  }
-
-  async function signIn() {
-    if (!sb || authBusy) return;
-    const email = document.getElementById('auth-email')?.value.trim();
-    const password = document.getElementById('auth-password')?.value;
-    if (!email || !password) return;
-
-    authBusy = true;
-    authMessage = '';
-    renderAuth();
-
-    const { data: result, error } = await sb.auth.signInWithPassword({ email, password });
-    authBusy = false;
-
-    if (error) {
-      authMessage = error.message;
-      renderAuth();
-      return;
-    }
-
-    session = result.session;
-    authMessage = '';
-    await loadCloudData();
-  }
-
-  async function signUp() {
-    if (!sb || authBusy) return;
-    const email = document.getElementById('auth-email')?.value.trim();
-    const password = document.getElementById('auth-password')?.value;
-    if (!email || !password) {
-      authMessage = 'Enter an email and password first.';
-      renderAuth();
-      return;
-    }
-
-    authBusy = true;
-    authMessage = '';
-    renderAuth();
-
-    const { data: result, error } = await sb.auth.signUp({ email, password });
-    authBusy = false;
-
-    if (error) {
-      authMessage = error.message;
-      renderAuth();
-      return;
-    }
-
-    if (result.session) {
-      session = result.session;
-      await loadCloudData();
-      return;
-    }
-
-    authMessage = 'Account created. Confirm the email from Supabase, then sign in.';
-    renderAuth();
-  }
-
-  async function signOut() {
-    if (!sb) return;
-    await sb.auth.signOut();
-    session = null;
-    syncState = 'connecting';
-    authMessage = '';
-    renderAuth();
-  }
-
   function renderAmountModal(clientId) {
     const client = data.clients.find(c => c.id === clientId);
     if (!client) return '';
@@ -548,7 +444,6 @@
     });
 
     document.getElementById('cancel-modal')?.addEventListener('click', closeModal);
-    document.getElementById('sign-out')?.addEventListener('click', () => void signOut());
 
     document.getElementById('amount-form')?.addEventListener('submit', event => {
       event.preventDefault();
