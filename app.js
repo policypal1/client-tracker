@@ -13,7 +13,7 @@
 
   const DEFAULT_CLIENTS = [
     { id: 'kumpula-mobile-detailing', name: 'Keizer Mobile Detailing', amount: 200, dueDay: 12 },
-    { id: 'one-clear-choice', name: 'The One Clear Choice Auto Glass', amount: 200, dueDay: 14 },
+    { id: 'one-clear-choice', name: 'The One Clear Choice Auto Glass', amount: 200, dueDay: 20 },
     { id: 'zh-homes', name: 'ZH Homes', amount: 400, dueDay: 26 }
   ];
 
@@ -477,7 +477,6 @@
     openMenuClientId = null;
     renderDashboard();
   }
-
   function closeModal() {
     modalClientId = null;
     renderDashboard();
