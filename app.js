@@ -12,14 +12,15 @@
   const sb = CLOUD_CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
   const DEFAULT_CLIENTS = [
-    { id: 'kumpula-mobile-detailing', name: 'Keizer Mobile Detailing', amount: 200, dueDay: 12 },
-    { id: 'one-clear-choice', name: 'The One Clear Choice Auto Glass', amount: 200, dueDay: 20 },
-    { id: 'zh-homes', name: 'ZH Homes', amount: 400, dueDay: 26 }
+    { id: 'kumpula-mobile-detailing', name: 'Keizer Mobile Detailing', amount: 200, dueDay: 12, paused: true },
+    { id: 'one-clear-choice', name: 'The One Clear Choice Auto Glass', amount: 200, dueDay: 20, paused: false },
+    { id: 'zh-homes', name: 'ZH Homes', amount: 400, dueDay: 26, paused: true }
   ];
 
   let data = loadLocalData();
   let session = null;
   let modalClientId = null;
+  let modalMode = null;
   let openMenuClientId = null;
   let toastTimer = null;
   let saveTimer = null;
@@ -36,14 +37,18 @@
         ...previous,
         amount: previous.amount == null ? def.amount : Number(previous.amount),
         dueDay: def.dueDay,
-        name: def.name
+        name: def.name,
+        paused: previous.paused == null ? Boolean(def.paused) : Boolean(previous.paused),
+        pausedAt: previous.pausedAt || null,
+        activeSince: previous.activeSince || null
       };
     });
 
     return {
       clients,
       payments: Array.isArray(saved?.payments) ? saved.payments : [],
-      skips: Array.isArray(saved?.skips) ? saved.skips : []
+      skips: Array.isArray(saved?.skips) ? saved.skips : [],
+      customPayments: Array.isArray(saved?.customPayments) ? saved.customPayments : []
     };
   }
 
@@ -129,7 +134,6 @@
       return;
     }
 
-    // First login: copy the current browser data into Supabase.
     syncState = 'saving';
     renderDashboard();
     await saveCloudData();
@@ -137,11 +141,7 @@
   }
 
   async function init() {
-    // Always show the tracker immediately. Supabase authentication happens
-    // silently in the background using an anonymous user, so there is no
-    // sign-in page or account setup.
     renderDashboard();
-
     if (!CLOUD_CONFIGURED) return;
 
     try {
@@ -194,6 +194,11 @@
     }).format(date);
   }
 
+  function dateInputValue(date = new Date()) {
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 10);
+  }
+
   function monthLabel(period) {
     const [year, month] = period.split('-').map(Number);
     return new Intl.DateTimeFormat('en-US', {
@@ -220,8 +225,16 @@
   function nextDue(client) {
     const now = new Date();
     let candidate = new Date(now.getFullYear(), now.getMonth(), client.dueDay);
-    let period = periodKey(candidate);
 
+    if (client.activeSince) {
+      const activeSince = new Date(client.activeSince);
+      const activeDay = new Date(activeSince.getFullYear(), activeSince.getMonth(), activeSince.getDate());
+      if (candidate < activeDay) {
+        candidate = new Date(candidate.getFullYear(), candidate.getMonth() + 1, client.dueDay);
+      }
+    }
+
+    let period = periodKey(candidate);
     while (handledFor(client.id, period)) {
       candidate = new Date(candidate.getFullYear(), candidate.getMonth() + 1, client.dueDay);
       period = periodKey(candidate);
@@ -250,12 +263,26 @@
   function totals() {
     const now = new Date();
     const thisMonth = periodKey(now);
-    const monthlyRevenue = data.clients.reduce((sum, client) => sum + (Number(client.amount) || 0), 0);
-    const collectedThisMonth = data.payments
+    const monthlyRevenue = data.clients
+      .filter(client => !client.paused)
+      .reduce((sum, client) => sum + (Number(client.amount) || 0), 0);
+
+    const recurringThisMonth = data.payments
       .filter(payment => payment.period === thisMonth)
       .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-    const totalRevenue = data.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
-    return { monthlyRevenue, collectedThisMonth, totalRevenue };
+
+    const customThisMonth = data.customPayments
+      .filter(payment => periodKey(new Date(payment.paidAt)) === thisMonth)
+      .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+
+    const recurringTotal = data.payments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    const customTotal = data.customPayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+
+    return {
+      monthlyRevenue,
+      collectedThisMonth: recurringThisMonth + customThisMonth,
+      totalRevenue: recurringTotal + customTotal
+    };
   }
 
   function escapeHtml(value) {
@@ -278,16 +305,19 @@
   function renderDashboard() {
     const summary = totals();
     const now = new Date();
-    const ordered = [...data.clients]
+    const activeClients = data.clients.filter(client => !client.paused);
+    const pausedClients = data.clients.filter(client => client.paused);
+    const ordered = activeClients
       .map(client => ({ client, due: nextDue(client) }))
       .sort((a, b) => a.due.date - b.due.date);
 
     const activity = [
       ...data.payments.map(payment => ({ ...payment, type: 'paid', at: payment.paidAt })),
-      ...data.skips.map(skip => ({ ...skip, type: 'skipped', at: skip.skippedAt }))
+      ...data.skips.map(skip => ({ ...skip, type: 'skipped', at: skip.skippedAt })),
+      ...data.customPayments.map(payment => ({ ...payment, type: 'custom', at: payment.paidAt }))
     ]
       .sort((a, b) => new Date(b.at) - new Date(a.at))
-      .slice(0, 8);
+      .slice(0, 10);
 
     app.innerHTML = `
       <div class="shell">
@@ -295,7 +325,7 @@
           <div>
             <div class="eyebrow">Kumpula</div>
             <h1>Payments</h1>
-            <p class="subtitle">See what’s coming up, then mark it paid or skip it.</p>
+            <p class="subtitle">See what’s coming up, then mark it paid or pause it.</p>
           </div>
           <div class="header-side">
             <div class="today">${formatDate(now)}</div>
@@ -309,17 +339,17 @@
           <article class="stat">
             <div class="stat-label">Monthly revenue</div>
             <div class="stat-value">${money(summary.monthlyRevenue)}</div>
-            <div class="stat-note">Recurring revenue scheduled each month</div>
+            <div class="stat-note">Active recurring revenue scheduled each month</div>
           </article>
           <article class="stat">
             <div class="stat-label">Collected this month</div>
             <div class="stat-value">${money(summary.collectedThisMonth)}</div>
-            <div class="stat-note">Payments received for ${monthLabel(periodKey(now))}</div>
+            <div class="stat-note">Recurring + custom payments received in ${monthLabel(periodKey(now))}</div>
           </article>
           <article class="stat">
             <div class="stat-label">Total revenue collected</div>
             <div class="stat-value">${money(summary.totalRevenue)}</div>
-            <div class="stat-note">All payments you’ve marked paid</div>
+            <div class="stat-note">All recurring and custom payments recorded</div>
           </article>
         </section>
 
@@ -329,66 +359,133 @@
             <div class="section-note">Closest payment first</div>
           </div>
           <div class="payment-list">
-            ${ordered.map(({ client, due }) => {
-              const status = dueText(due.date);
-              const menuOpen = openMenuClientId === client.id;
-              return `
-                <article class="payment-card ${menuOpen ? 'menu-open' : ''}">
-                  <div class="client-block">
-                    <div class="client-name">${escapeHtml(client.name)}</div>
-                    <div class="client-meta">Due every month on the ${ordinal(client.dueDay)}</div>
-                  </div>
-                  <div class="amount-block">
-                    <div class="amount">${money(client.amount)}</div>
-                  </div>
-                  <div class="due-block">
-                    <div class="due-date">${formatDate(due.date)}</div>
-                    <div class="due-count ${status.cls}">${status.text}</div>
-                  </div>
-                  <button class="primary-btn" data-paid="${client.id}">Mark paid</button>
-                  <div class="menu-wrap">
-                    <button class="menu-btn" data-menu="${client.id}" aria-label="More options for ${escapeHtml(client.name)}" aria-expanded="${menuOpen}">•••</button>
-                    ${menuOpen ? `
-                      <div class="menu-popover">
-                        <button data-skip="${client.id}">Skip ${monthLabel(due.period)} payment</button>
-                        <button data-edit="${client.id}">Edit monthly amount</button>
-                      </div>
-                    ` : ''}
-                  </div>
-                </article>
-              `;
-            }).join('')}
+            ${ordered.length ? ordered.map(({ client, due }) => renderActiveClient(client, due)).join('') : '<div class="empty-card">No active client payments right now.</div>'}
           </div>
         </section>
 
+        ${pausedClients.length ? `
+          <section class="paused-section">
+            <div class="section-head">
+              <h2 class="section-title">Paused clients</h2>
+              <div class="section-note">Not counted in monthly revenue</div>
+            </div>
+            <div class="payment-list paused-list">
+              ${pausedClients.map(client => renderPausedClient(client)).join('')}
+            </div>
+          </section>
+        ` : ''}
+
         <section class="recent">
-          <div class="section-head">
-            <h2 class="section-title">Recent activity</h2>
-            <div class="section-note">Payments and skips</div>
+          <div class="section-head activity-head">
+            <div>
+              <h2 class="section-title">Recent activity</h2>
+              <div class="section-note activity-note">Payments, custom entries, and skips</div>
+            </div>
+            <button class="primary-btn add-payment-btn" id="add-custom-payment">+ Add custom payment</button>
           </div>
           <div class="history">
-            ${activity.length ? activity.map(item => {
-              const client = data.clients.find(c => c.id === item.clientId);
-              const isPaid = item.type === 'paid';
-              return `
-                <div class="history-row">
-                  <div>
-                    <div class="history-name">${escapeHtml(client?.name || 'Client')}</div>
-                    <div class="history-period">${monthLabel(item.period)} payment</div>
-                  </div>
-                  <div class="history-amount ${isPaid ? '' : 'skip-label'}">${isPaid ? money(item.amount) : 'Skipped'}</div>
-                  <div class="history-date">${isPaid ? 'Received' : 'Skipped'} ${formatDate(new Date(item.at))}</div>
-                  <button class="danger-btn" data-undo-type="${item.type}" data-undo="${item.id}">Undo</button>
-                </div>
-              `;
-            }).join('') : '<div class="empty">No payment activity yet.</div>'}
+            ${activity.length ? activity.map(item => renderActivity(item)).join('') : '<div class="empty">No payment activity yet.</div>'}
           </div>
         </section>
       </div>
-      ${modalClientId ? renderAmountModal(modalClientId) : ''}
+      ${modalMode === 'amount' && modalClientId ? renderAmountModal(modalClientId) : ''}
+      ${modalMode === 'custom' ? renderCustomPaymentModal() : ''}
     `;
 
     bindDashboardEvents();
+  }
+
+  function renderActiveClient(client, due) {
+    const status = dueText(due.date);
+    const menuOpen = openMenuClientId === client.id;
+    return `
+      <article class="payment-card ${menuOpen ? 'menu-open' : ''}">
+        <div class="client-block">
+          <div class="client-name">${escapeHtml(client.name)}</div>
+          <div class="client-meta">Due every month on the ${ordinal(client.dueDay)}</div>
+        </div>
+        <div class="amount-block">
+          <div class="amount">${money(client.amount)}</div>
+        </div>
+        <div class="due-block">
+          <div class="due-date">${formatDate(due.date)}</div>
+          <div class="due-count ${status.cls}">${status.text}</div>
+        </div>
+        <button class="primary-btn" data-paid="${client.id}">Mark paid</button>
+        <div class="menu-wrap">
+          <button class="menu-btn" data-menu="${client.id}" aria-label="More options for ${escapeHtml(client.name)}" aria-expanded="${menuOpen}">•••</button>
+          ${menuOpen ? `
+            <div class="menu-popover">
+              <button data-skip="${client.id}">Skip ${monthLabel(due.period)} payment</button>
+              <button data-pause="${client.id}">Pause client</button>
+              <button data-edit="${client.id}">Edit monthly amount</button>
+            </div>
+          ` : ''}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderPausedClient(client) {
+    const menuOpen = openMenuClientId === client.id;
+    return `
+      <article class="payment-card paused-card ${menuOpen ? 'menu-open' : ''}">
+        <div class="client-block">
+          <div class="client-name-row">
+            <div class="client-name">${escapeHtml(client.name)}</div>
+            <span class="paused-badge">Paused</span>
+          </div>
+          <div class="client-meta">Recurring payment is sitting out for now</div>
+        </div>
+        <div class="amount-block">
+          <div class="amount">${money(client.amount)}</div>
+        </div>
+        <div class="due-block">
+          <div class="due-date muted-date">Not scheduled</div>
+          <div class="due-count">Resume whenever you’re ready</div>
+        </div>
+        <button class="ghost-btn resume-btn" data-resume="${client.id}">Resume</button>
+        <div class="menu-wrap">
+          <button class="menu-btn" data-menu="${client.id}" aria-label="More options for ${escapeHtml(client.name)}" aria-expanded="${menuOpen}">•••</button>
+          ${menuOpen ? `
+            <div class="menu-popover">
+              <button data-resume="${client.id}">Resume client</button>
+              <button data-edit="${client.id}">Edit monthly amount</button>
+            </div>
+          ` : ''}
+        </div>
+      </article>
+    `;
+  }
+
+  function renderActivity(item) {
+    if (item.type === 'custom') {
+      return `
+        <div class="history-row">
+          <div>
+            <div class="history-name">${escapeHtml(item.description || 'Custom payment')}</div>
+            <div class="history-period">Custom payment</div>
+          </div>
+          <div class="history-amount">${money(item.amount)}</div>
+          <div class="history-date">Received ${formatDate(new Date(item.paidAt))}</div>
+          <button class="danger-btn" data-undo-type="custom" data-undo="${item.id}">Undo</button>
+        </div>
+      `;
+    }
+
+    const client = data.clients.find(c => c.id === item.clientId);
+    const isPaid = item.type === 'paid';
+    return `
+      <div class="history-row">
+        <div>
+          <div class="history-name">${escapeHtml(client?.name || 'Client')}</div>
+          <div class="history-period">${monthLabel(item.period)} payment</div>
+        </div>
+        <div class="history-amount ${isPaid ? '' : 'skip-label'}">${isPaid ? money(item.amount) : 'Skipped'}</div>
+        <div class="history-date">${isPaid ? 'Received' : 'Skipped'} ${formatDate(new Date(item.at))}</div>
+        <button class="danger-btn" data-undo-type="${item.type}" data-undo="${item.id}">Undo</button>
+      </div>
+    `;
   }
 
   function renderAmountModal(clientId) {
@@ -400,6 +497,7 @@
           <h2 id="amount-title">Monthly payment</h2>
           <p>Change the recurring payment amount for ${escapeHtml(client.name)}.</p>
           <form id="amount-form">
+            <label class="field-label" for="amount-input">Monthly amount</label>
             <div class="input-wrap">
               <span class="input-prefix">$</span>
               <input class="money-input" id="amount-input" type="number" min="0" step="1" inputmode="decimal" value="${client.amount ?? ''}" placeholder="0" required />
@@ -407,6 +505,35 @@
             <div class="modal-actions">
               <button type="button" class="ghost-btn" id="cancel-modal">Cancel</button>
               <button type="submit" class="primary-btn">Save amount</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderCustomPaymentModal() {
+    return `
+      <div class="modal-backdrop" data-close-modal>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="custom-title">
+          <h2 id="custom-title">Add custom payment</h2>
+          <p>Record money that doesn’t belong to one of the recurring client payments.</p>
+          <form id="custom-payment-form" class="custom-payment-form">
+            <label class="field-label" for="custom-description">What was it for?</label>
+            <input class="text-input" id="custom-description" type="text" maxlength="80" placeholder="Website build, ad setup, deposit..." required />
+
+            <label class="field-label" for="custom-amount">Amount</label>
+            <div class="input-wrap">
+              <span class="input-prefix">$</span>
+              <input class="money-input" id="custom-amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0" required />
+            </div>
+
+            <label class="field-label" for="custom-date">Payment date</label>
+            <input class="text-input" id="custom-date" type="date" value="${dateInputValue()}" required />
+
+            <div class="modal-actions">
+              <button type="button" class="ghost-btn" id="cancel-modal">Cancel</button>
+              <button type="submit" class="primary-btn">Add payment</button>
             </div>
           </form>
         </div>
@@ -435,10 +562,25 @@
       });
     });
 
+    document.querySelectorAll('[data-pause]').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        pauseClient(button.dataset.pause);
+      });
+    });
+
+    document.querySelectorAll('[data-resume]').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        resumeClient(button.dataset.resume);
+      });
+    });
+
     document.querySelectorAll('[data-edit]').forEach(button => {
       button.addEventListener('click', event => {
         event.stopPropagation();
         modalClientId = button.dataset.edit;
+        modalMode = 'amount';
         openMenuClientId = null;
         renderDashboard();
         queueMicrotask(() => document.getElementById('amount-input')?.focus());
@@ -447,6 +589,14 @@
 
     document.querySelectorAll('[data-undo]').forEach(button => {
       button.addEventListener('click', () => undoActivity(button.dataset.undoType, button.dataset.undo));
+    });
+
+    document.getElementById('add-custom-payment')?.addEventListener('click', () => {
+      modalMode = 'custom';
+      modalClientId = null;
+      openMenuClientId = null;
+      renderDashboard();
+      queueMicrotask(() => document.getElementById('custom-description')?.focus());
     });
 
     const backdrop = document.querySelector('[data-close-modal]');
@@ -463,9 +613,24 @@
       if (!client || !Number.isFinite(value) || value < 0) return;
       client.amount = value;
       saveData();
-      modalClientId = null;
+      closeModal(false);
       renderDashboard();
       showToast('Monthly payment updated.');
+    });
+
+    document.getElementById('custom-payment-form')?.addEventListener('submit', event => {
+      event.preventDefault();
+      const description = String(document.getElementById('custom-description')?.value || '').trim();
+      const amount = Number(document.getElementById('custom-amount')?.value);
+      const dateValue = document.getElementById('custom-date')?.value;
+      if (!description || !Number.isFinite(amount) || amount <= 0 || !dateValue) return;
+
+      const paidAt = new Date(`${dateValue}T12:00:00`).toISOString();
+      data.customPayments.push({ id: uid(), description, amount, paidAt });
+      saveData();
+      closeModal(false);
+      renderDashboard();
+      showToast('Custom payment added.');
     });
 
     document.addEventListener('click', closeOpenMenu, { once: true });
@@ -477,14 +642,16 @@
     openMenuClientId = null;
     renderDashboard();
   }
-  function closeModal() {
+
+  function closeModal(shouldRender = true) {
     modalClientId = null;
-    renderDashboard();
+    modalMode = null;
+    if (shouldRender) renderDashboard();
   }
 
   function markPaid(clientId) {
     const client = data.clients.find(c => c.id === clientId);
-    if (!client) return;
+    if (!client || client.paused) return;
 
     const due = nextDue(client);
     data.payments.push({
@@ -503,7 +670,7 @@
 
   function skipPayment(clientId) {
     const client = data.clients.find(c => c.id === clientId);
-    if (!client) return;
+    if (!client || client.paused) return;
     const due = nextDue(client);
     const label = monthLabel(due.period);
 
@@ -522,12 +689,40 @@
     showToast(`${label} payment skipped.`);
   }
 
+  function pauseClient(clientId) {
+    const client = data.clients.find(c => c.id === clientId);
+    if (!client || client.paused) return;
+    if (!window.confirm(`Pause ${client.name}? They will stay in the tracker but won't count toward monthly revenue until you resume them.`)) return;
+
+    client.paused = true;
+    client.pausedAt = new Date().toISOString();
+    openMenuClientId = null;
+    saveData();
+    renderDashboard();
+    showToast(`${client.name} paused.`);
+  }
+
+  function resumeClient(clientId) {
+    const client = data.clients.find(c => c.id === clientId);
+    if (!client || !client.paused) return;
+
+    client.paused = false;
+    client.pausedAt = null;
+    client.activeSince = new Date().toISOString();
+    openMenuClientId = null;
+    saveData();
+    renderDashboard();
+    showToast(`${client.name} resumed.`);
+  }
+
   function undoActivity(type, id) {
     if (type === 'paid') data.payments = data.payments.filter(payment => payment.id !== id);
     if (type === 'skipped') data.skips = data.skips.filter(skip => skip.id !== id);
+    if (type === 'custom') data.customPayments = data.customPayments.filter(payment => payment.id !== id);
     saveData();
     renderDashboard();
-    showToast(type === 'skipped' ? 'Skipped payment restored.' : 'Payment removed.');
+    if (type === 'skipped') showToast('Skipped payment restored.');
+    else showToast('Payment removed.');
   }
 
   function ordinal(n) {
